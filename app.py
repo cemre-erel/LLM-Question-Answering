@@ -1,12 +1,12 @@
 
+import os
 import streamlit as st
 import torch
 from pathlib import Path
 from peft import PeftModel
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
 import pandas as pd
 from threading import Thread
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
 import io
 from openpyxl.styles import Alignment, Font
 from rag_utils import (
@@ -15,6 +15,7 @@ from rag_utils import (
     index_pdf_chunks,
     retrieve_context,
 )
+from agent import build_agent, run as run_agent
 
 
 
@@ -68,20 +69,22 @@ ADAPTER_PATH = Path(__file__).parent / "qwen3_1_7b_lora_adapter"
 @st.cache_resource(show_spinner="Düşünüyor...")
 def load_local_model():
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.float16 if device == "cuda" else torch.float32
 
     base_model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL,
-        dtype=torch.float16,
-    ).to("cuda")
+        dtype=dtype,
+    ).to(device)
 
     model = PeftModel.from_pretrained(base_model, ADAPTER_PATH)
     model.eval()
 
-    return tokenizer, model
+    return tokenizer, model, device
 
 
 def generate_answer(messages):
-    tokenizer, model = load_local_model()
+    tokenizer, model, device = load_local_model()
 
     inputs = tokenizer.apply_chat_template(
         messages,
@@ -90,7 +93,7 @@ def generate_answer(messages):
         enable_thinking=False,
         return_dict=True,
         return_tensors="pt",
-    ).to("cuda")
+    ).to(device)
 
     with torch.no_grad():
         output = model.generate(
@@ -117,7 +120,7 @@ def ask_llm(question, prompt):
 
 
 def ask_llm_stream(history, prompt):
-    tokenizer, model = load_local_model()
+    tokenizer, model, device = load_local_model()
 
     messages = [
         {"role": "system", "content": f"{BASE_RULE} {prompt}"}
@@ -137,7 +140,7 @@ def ask_llm_stream(history, prompt):
         enable_thinking=False,
         return_dict=True,
         return_tensors="pt",
-    ).to("cuda")
+    ).to(device)
 
     streamer = TextIteratorStreamer(
         tokenizer,
@@ -182,7 +185,14 @@ if "current" not in st.session_state:
 def new_chat():
     cid = st.session_state.next_id
     st.session_state.next_id += 1
-    st.session_state.chats[cid] = {"title": "Yeni sohbet", "messages": []}
+    st.session_state.chats[cid] = {
+        "title": "Yeni sohbet",
+        "messages": [],
+        "rag_collection_name": None,
+        "rag_source_name": None,
+        "agent": None,
+        "agent_collection": None,
+    }
     st.session_state.current = cid
 
 
@@ -197,6 +207,29 @@ st.markdown("""
 <style>
 [class*="st-key-del_"] { opacity: 0; transition: opacity .15s; }
 [class*="st-key-row_"]:hover [class*="st-key-del_"] { opacity: 1; }
+
+.agent-loader {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #888;
+    font-size: 14px;
+}
+
+.agent-loader::before {
+    content: "";
+    width: 14px;
+    height: 14px;
+    border: 2px solid #ccc;
+    border-top-color: #6c8cff;
+    border-radius: 50%;
+    animation: agent-spin 0.8s linear infinite;
+}
+
+@keyframes agent-spin {
+    to { transform: rotate(360deg); }
+}
+
 [class*="st-key-del_"] button,
 [class*="st-key-del_"] button * {
     color: #e5655b;
@@ -207,6 +240,15 @@ st.markdown("""
 }
 [class*="st-key-del_"] button:hover {
     background: rgba(229, 101, 91, 0.12);
+}
+[data-testid="stStatusWidget"] {
+    visibility: hidden;
+}
+[data-testid="stStatusWidget"] svg {
+    display: none;
+}
+[data-testid="stStatusWidget"] {
+    visibility: hidden;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -244,12 +286,19 @@ with tab_chat:
 
     chat_area = st.container()
 
-    col_prompt, col_input = st.columns([1, 4])
+    col_engine, col_prompt, col_input = st.columns([1.5, 1, 3])
+    with col_engine:
+        response_engine = st.selectbox(
+            "Yanıt motoru",
+            ["Yerel LoRA", "AI Agent (Ollama)"],
+            key="response_engine",
+        )
     with col_prompt:
         prompt_type = st.selectbox(
             "Prompt türü",
             list(prompts.keys()),
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            disabled=response_engine == "AI Agent (Ollama)",
         )
     with col_input:
         submission = st.chat_input(
@@ -297,8 +346,8 @@ with tab_chat:
                             chunks,
                         )
 
-                    st.session_state.rag_collection_name = collection_name
-                    st.session_state.rag_source_name = uploaded_pdf.name
+                    chat["rag_collection_name"] = collection_name
+                    chat["rag_source_name"] = uploaded_pdf.name
 
                     attachments.append({
                         "name": uploaded_pdf.name,
@@ -335,40 +384,82 @@ with tab_chat:
                         )
 
                 if question:
-                    context = ""
-                    source_pages = []
-                    collection_name = st.session_state.get("rag_collection_name")
-
-                    if collection_name:
-                        context, source_pages = retrieve_context(
-                            question,
-                            collection_name,
-                        )
-
-                    answer_prompt = prompts[prompt_type]
-
-                    if collection_name:
-                        answer_prompt += (
-                            "\n\nYanıtı yalnızca aşağıdaki PDF bağlamına göre ver. "
-                            "Bağlamda yanıt yoksa bunu açıkça söyle.\n\n"
-                            f"PDF bağlamı:\n{context}"
-                        )
-
+                    collection_name = chat.get("rag_collection_name")
                     with st.chat_message("assistant"):
-                        answer = st.write_stream(
-                            ask_llm_stream(
-                                chat["messages"],
-                                answer_prompt,
-                            )
-                        )
+                        if response_engine == "AI Agent (Ollama)":
+                            if chat.get("agent") is None or chat.get("agent_collection") != collection_name:
+                                chat["agent"] = build_agent(
+                                    model=os.environ.get("AGENT_MODEL", "qwen3:4b"),
+                                    pdf_collection=collection_name,
+                                )
+                                chat["agent_collection"] = collection_name
 
-                        if source_pages:
-                            source_text = (
-                                "Kaynak sayfa(lar): "
-                                + ", ".join(map(str, source_pages))
+                            history = [
+                                {"role": message["role"], "content": message["content"]}
+                                for message in chat["messages"][:-1]
+                                if message.get("content")
+                            ]
+                            loader = st.empty()
+                            loader.markdown(
+                                '<div class="agent-loader">Agent düşünüyor...</div>',
+                                unsafe_allow_html=True,
                             )
-                            st.caption(source_text)
-                            answer = f"{answer}\n\n{source_text}"
+                            try:
+                                result = run_agent(
+                                    chat["agent"],
+                                    question,
+                                    history=history,
+                                )
+                            finally:
+                                loader.empty()
+
+                            answer = result["answer"]
+                            st.write(answer)
+                            if result["trace"]:
+                                with st.expander("Kullanılan araçlar ve işlem izi"):
+                                    for trace_line in result["trace"]:
+                                        st.code(trace_line, language="text")
+                            st.caption(
+                                f"Model: {os.environ.get('AGENT_MODEL', 'qwen3:4b')} · "
+                                f"{result['llm_calls']} model çağrısı · {result['seconds']} sn"
+                            )
+                        else:
+                            context = ""
+                            source_pages = []
+                            if collection_name:
+                                context, source_pages = retrieve_context(
+                                    question,
+                                    collection_name,
+                                )
+
+                            answer_prompt = prompts[prompt_type]
+                            if collection_name and not context:
+                                answer = (
+                                    "Yüklenen PDF'de bu soruyla ilgili bir bölüm "
+                                    "bulamadım. Daha açık bir soru deneyebilirsin."
+                                )
+                                st.write(answer)
+                            else:
+                                if collection_name:
+                                    answer_prompt += (
+                                        "\n\nYanıtı yalnızca aşağıdaki PDF bağlamına göre ver. "
+                                        "Bağlamda yanıt yoksa bunu açıkça söyle.\n\n"
+                                        f"PDF bağlamı:\n{context}"
+                                    )
+                                answer = st.write_stream(
+                                    ask_llm_stream(
+                                        chat["messages"],
+                                        answer_prompt,
+                                    )
+                                )
+
+                            if source_pages:
+                                source_text = (
+                                    "Kaynak sayfa(lar): "
+                                    + ", ".join(map(str, source_pages))
+                                )
+                                st.caption(source_text)
+                                answer = f"{answer}\n\n{source_text}"
 
                     chat["messages"].append({
                         "role": "assistant",

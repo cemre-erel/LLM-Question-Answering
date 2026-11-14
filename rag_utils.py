@@ -1,18 +1,20 @@
 import pymupdf
 import hashlib
+import os
+from pathlib import Path
 import chromadb
 import ollama
 import pytesseract
 from PIL import Image
 
-pytesseract.pytesseract.tesseract_cmd = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-)
+_tesseract_cmd = os.environ.get("TESSERACT_CMD")
+if _tesseract_cmd:
+    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
 
 MAX_PDF_SIZE_MB = 20
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
-CHROMA_PATH = "chroma_db"
+CHROMA_PATH = str(Path(__file__).resolve().parent / "chroma_db")
 EMBEDDING_MODEL = "bge-m3"
 
 def split_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
@@ -42,29 +44,29 @@ def extract_pdf_chunks(pdf_bytes):
             f"PDF en fazla {MAX_PDF_SIZE_MB} MB olabilir."
         )
 
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     all_chunks = []
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for page_number, page in enumerate(doc, start=1):
+            # Prefer embedded text; OCR is slower and requires a separate install.
+            text = page.get_text("text").strip()
+            if not text:
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+                image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                try:
+                    text = pytesseract.image_to_string(image, lang="tur+eng").strip()
+                except pytesseract.TesseractError as exc:
+                    raise RuntimeError(
+                        "PDF taranmış görünüyor; Tesseract OCR ve tur+eng dil "
+                        "verilerinin kurulu olduğunu, gerekirse TESSERACT_CMD "
+                        "ortam değişkeninin ayarlandığını kontrol edin."
+                    ) from exc
 
-    for page_number, page in enumerate(doc, start=1):
-        pix = page.get_pixmap(
-            matrix=pymupdf.Matrix(3, 3),
-            alpha=False,
-        )
-        image = Image.frombytes(
-            "RGB",
-            [pix.width, pix.height],
-            pix.samples,
-        )
-        text = pytesseract.image_to_string(image, lang="tur+eng")
-
-        for chunk_number, chunk in enumerate(split_text(text), start=1):
-            all_chunks.append({
-                "page": page_number,
-                "chunk": chunk_number,
-                "text": chunk,
-            })
-
-    doc.close()
+            for chunk_number, chunk in enumerate(split_text(text), start=1):
+                all_chunks.append({
+                    "page": page_number,
+                    "chunk": chunk_number,
+                    "text": chunk,
+                })
     return all_chunks
 
 def index_pdf_chunks(pdf_bytes, chunks):

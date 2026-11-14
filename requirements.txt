@@ -1,0 +1,18 @@
+# Streamlit question-answering app and PDF/RAG
+streamlit
+torch
+transformers
+peft
+pandas
+openpyxl
+pymupdf
+chromadb
+ollama
+pytesseract
+Pillow
+
+# LangChain tool-using agent
+langchain>=1.0
+langchain-ollama
+langgraph
+requests
