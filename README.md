@@ -1,40 +1,63 @@
-# Büyük Dil Modellerinde Fine-Tuning ve RAG
+# LLM Soru-Cevap ve AI Agent
 
-Bu proje, büyük dil modellerinde RAG ve fine-tuning yaklaşımlarını uygulamalı olarak incelemek amacıyla geliştirilmiştir.
+Bu proje iki kullanım sunar:
 
-## Proje bölümleri
-
-### RAG tabanlı PDF soru-cevap sistemi
-- PDF dosyalarından metin çıkarma ve metni parçalara ayırma
-- `bge-m3` ile metin parçalarını vektörleştirme
-- Vektörleri ChromaDB’de saklama ve soruya uygun parçaları getirme
-- Ollama üzerinden yanıt üretme
-- Streamlit arayüzünde PDF yükleme ve soru-cevap
-
-### LoRA fine-tuning denemesi
-- Temel model: `Qwen/Qwen3-1.7B`
-- Yöntem: LoRA
-- Veri kümesi: `merve/turkish_instructions`
-- Eğitim için kullanılan örnek: 898
-- Eğitim öncesi ve sonrası çıktılar beş soru üzerinden karşılaştırılmıştır.
-
-## Dosyalar
-
-- `app.py`: Streamlit uygulaması
-- `rag_utils.py`: RAG ve belge işleme yardımcıları
-- `finetune_qwen3.py`: LoRA eğitim kodu
-- `compare_qwen3.py`: Eğitim öncesi ve sonrası çıktıları karşılaştırma
-- `baseline_instruct.py`: Temel model çıktıları için deneme kodu
-- `pdf_test.py`: PDF metin çıkarma denemesi
+- Streamlit arayüzü: yerel Qwen3-1.7B LoRA modelini kullanır; sohbet, PDF ile RAG ve prompt karşılaştırması sağlar.
+- LangChain agent: Ollama üzerinden araç seçer; hesaplama, Wikipedia araması, özetleme ve isteğe bağlı PDF araması yapar.
 
 ## Kurulum
 
-pip install streamlit transformers peft datasets accelerate chromadb ollama pymupdf pytesseract pillow pandas openpyxl
+Python 3.10 veya üzeri ve Ollama gerekir. Proje klasöründe:
 
-### Kullanılan modeller
+~~~powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+~~~
 
-- **Qwen/Qwen3-1.7B:** LoRA fine-tuning ve sohbet uygulamasındaki yanıt üretimi için temel model.
-- **bge-m3:** PDF parçalarını ve kullanıcı sorularını vektörleştirmek için Ollama üzerinden kullanılır.
-- **gemma2:9b:** Önceki RAG denemelerinde yanıt modeli olarak kullanılmıştır. Güncel `app.py` içindeki yanıt modeli Qwen3-1.7B ve LoRA adaptörüdür.
+Ollama'yı çalıştırıp modelleri indirin:
 
-Fine-tuning sırasında Hugging Face, Qwen3-1.7B modelini ve `merve/turkish_instructions` veri kümesini indirir. RAG özellikleri için Ollama’da `bge-m3` ve `gemma2:9b` modellerinin kurulu olması gerekir.
+~~~powershell
+ollama pull qwen3:4b
+ollama pull bge-m3
+~~~
+
+bge-m3, PDF RAG gömmeleri için kullanılır. Taranmış PDF'lerde Tesseract OCR ve Türkçe/İngilizce dil verileri gereklidir. Tesseract standart konumda değilse PowerShell'de TESSERACT_CMD ortam değişkenini tesseract.exe dosyanızın yoluna ayarlayın. Metin katmanı bulunan PDF'lerde OCR gerekmez.
+
+## Çalıştırma
+
+Streamlit arayüzü (üst bölümde “Yanıt motoru” seçicisinden Yerel LoRA veya AI Agent seç):
+
+~~~powershell
+streamlit run app.py
+~~~
+
+Araç kullanan agent:
+
+~~~powershell
+python agent.py --model qwen3:4b
+~~~
+
+Agent'a PDF aracı eklemek için:
+
+~~~powershell
+python agent.py --model qwen3:4b --pdf data/Cemre_Erel_KenarTespiti.pdf
+~~~
+
+Agent testleri:
+
+~~~powershell
+python run_tests.py --models qwen3:4b
+python run_tests.py --models qwen3:4b --pdf data/Cemre_Erel_KenarTespiti.pdf --pdf-soru "PDF'in konusu nedir?"
+~~~
+
+Test çıktısı varsayılan olarak results.csv dosyasına yazılır. Önceki sonuçları korumak için --out yeni_sonuclar.csv kullanın.
+
+## Notlar
+
+- Yerel agent modeli ve bge-m3 Ollama servisine, Streamlit arayüzündeki LoRA modeli Hugging Face model dosyalarına ihtiyaç duyar.
+- PDF indeksleri proje klasöründeki chroma_db altında saklanır.
+- CPU'da arayüz çalışabilir ancak yanıtlar GPU'ya göre belirgin biçimde yavaş olabilir.
+- Çok adımlı araç kullanımı modelin tool-calling başarısına bağlıdır; araç izi ve yanıtlar birlikte değerlendirilmelidir.
+- Streamlit içindeki AI Agent modu Ollama'da qwen3:4b modelini kullanır. Farklı bir model için uygulamayı başlatmadan önce AGENT_MODEL ortam değişkenini model etiketiyle ayarlayın.
